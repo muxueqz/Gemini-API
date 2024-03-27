@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 
-class Chat(BaseModel):
+class Conversation(BaseModel):
     """
     A single reply candidate object in the model output. A full response from Gemini usually contains multiple reply candidates.
 
@@ -14,14 +14,3 @@ class Chat(BaseModel):
 
     cid: str
     name: str
-
-class Chats(BaseModel):
-    """
-    A single reply candidate object in the model output. A full response from Gemini usually contains multiple reply candidates.
-
-    Parameters
-    ----------
-    Chats: `list[Chat]`
-    """
-
-    chats: list[Chat]

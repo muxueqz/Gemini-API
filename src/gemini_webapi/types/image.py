@@ -69,6 +69,7 @@ class Image(BaseModel):
         `httpx.HTTPError`
             If the network request failed.
         """
+
         filename = filename or self.url.split("/")[-1].split("?")[0]
         try:
             filename = re.search(r"^(.*\.\w+)", filename).group()
@@ -98,7 +99,7 @@ class Image(BaseModel):
                 if verbose:
                     logger.info(f"Image saved as {dest.resolve()}")
 
-                return dest.resolve()
+                return str(dest.resolve())
             else:
                 raise HTTPError(
                     f"Error downloading image: {response.status_code} {response.reason_phrase}"
@@ -136,7 +137,7 @@ class GeneratedImage(Image):
         return v
 
     # @override
-    async def save(self, **kwargs) -> None:
+    async def save(self, **kwargs) -> str | None:
         """
         Save the image to disk.
 
@@ -147,8 +148,14 @@ class GeneratedImage(Image):
             And since the URL ends with a long hash, by default will use timestamp + end of the hash as the filename.
         kwargs: `dict`, optional
             Other arguments to pass to `Image.save`.
+
+        Returns
+        -------
+        `str | None`
+            Absolute path of the saved image if successfully saved.
         """
-        await super().save(
+
+        return await super().save(
             filename=kwargs.pop("filename", None)
             or f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{self.url[-10:]}.png",
             cookies=self.cookies,

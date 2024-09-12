@@ -1,23 +1,25 @@
-import json
-import functools
 import asyncio
+import functools
+import json
+import re
 from asyncio import Task
-from typing import Any, Dict, Optional
+from .types import WebImage, GeneratedImage, Candidate, ModelOutput, Conversation
+from .exceptions import AuthError, APIError, TimeoutError, GeminiError
+from pathlib import Path
+from typing import Any, Optional
 
 from httpx import AsyncClient, ReadTimeout
 
-from .types import WebImage, GeneratedImage, Candidate, ModelOutput, Conversation
-from .exceptions import AuthError, APIError, TimeoutError, GeminiError
 from .constants import Endpoint, Headers
+from .exceptions import AuthError, APIError, TimeoutError, GeminiError
 from .utils import (
-    get_cookie_by_name,
     upload_file,
-    get_access_token,
     rotate_1psidts,
+    get_access_token,
+    load_browser_cookies,
     rotate_tasks,
     logger,
 )
-import random
 
 
 def running(retry: int = 0) -> callable:
@@ -82,8 +84,7 @@ class GeminiClient:
     Raises
     ------
     `ValueError`
-        If `secure_1psid` is not provided and optional dependency `browser-cookie3` is not installed, or
-        `browser-cookie3` is installed but cookies for google.com are not found in your local browser storage.
+        If `browser-cookie3` is installed but cookies for google.com are not found in your local browser storage.
     """
 
     __slots__ = [
@@ -110,12 +111,12 @@ class GeminiClient:
         self.cookies = {}
         self.proxies = proxies
         self.running: bool = False
-        self.client: AsyncClient = None
-        self.access_token: str = None
+        self.client: AsyncClient | None = None
+        self.access_token: str | None = None
         self.timeout: float = 30
         self.auto_close: bool = False
         self.close_delay: float = 300
-        self.close_task: Task = None
+        self.close_task: Task | None = None
         self.auto_refresh: bool = True
         self.refresh_interval: float = 540
 
@@ -128,17 +129,13 @@ class GeminiClient:
                 self.cookies["__Secure-1PSIDTS"] = secure_1psidts
         else:
             try:
-                import browser_cookie3
-
-                cookies = browser_cookie3.load(domain_name="google.com")
-                if not (cookies and get_cookie_by_name(cookies, "__Secure-1PSID")):
+                cookies = load_browser_cookies(domain_name="google.com")
+                if not (cookies and cookies.get("__Secure-1PSID")):
                     raise ValueError(
                         "Failed to load cookies from local browser. Please pass cookie values manually."
                     )
             except ImportError:
-                raise ValueError(
-                    "'secure_1psid' must be provided if optional dependency 'browser-cookie3' is not installed."
-                )
+                pass
 
     async def init(
         self,
@@ -158,7 +155,7 @@ class GeminiClient:
             Request timeout of the client in seconds. Used to limit the max waiting time when sending a request.
         auto_close: `bool`, optional
             If `True`, the client will close connections and clear resource usage after a certain period
-            of inactivity. Useful for keep-alive services.
+            of inactivity. Useful for always-on services.
         close_delay: `float`, optional
             Time to wait before auto-closing the client in seconds. Effective only if `auto_close` is `True`.
         auto_refresh: `bool`, optional
@@ -168,6 +165,7 @@ class GeminiClient:
         verbose: `bool`, optional
             If `True`, will print more infomation in logs.
         """
+
         try:
             access_token, valid_cookies = await get_access_token(
                 base_cookies=self.cookies, proxies=self.proxies, verbose=verbose
@@ -214,8 +212,11 @@ class GeminiClient:
         delay: `float`, optional
             Time to wait before closing the client in seconds.
         """
+
         if delay:
             await asyncio.sleep(delay)
+
+        self.running = False
 
         if self.close_task:
             self.close_task.cancel()
@@ -224,12 +225,11 @@ class GeminiClient:
         if self.client:
             await self.client.aclose()
 
-        self.running = False
-
     async def reset_close_task(self) -> None:
         """
         Reset the timer for closing the client when a new request is made.
         """
+
         if self.close_task:
             self.close_task.cancel()
             self.close_task = None
@@ -239,6 +239,7 @@ class GeminiClient:
         """
         Start the background task to automatically refresh cookies.
         """
+
         while True:
             try:
                 new_1psidts = await rotate_1psidts(self.cookies, self.proxies)
@@ -254,11 +255,11 @@ class GeminiClient:
                 self.cookies["__Secure-1PSIDTS"] = new_1psidts
             await asyncio.sleep(self.refresh_interval)
 
-    @running(retry=1)
+    @running(retry=2)
     async def generate_content(
         self,
         prompt: str,
-        image: bytes | str | None = None,
+        images: list[bytes | str | Path] | None = None,
         chat: Optional["ChatSession"] = None,
     ) -> ModelOutput:
         """
@@ -268,8 +269,8 @@ class GeminiClient:
         ----------
         prompt: `str`
             Prompt provided by user.
-        image: `bytes` | `str`, optional
-            File data in bytes, or path to the image file to be sent together with the prompt.
+        images: `list[bytes | str | Path]`, optional
+            List of image file paths or file data in bytes.
         chat: `ChatSession`, optional
             Chat data to retrieve conversation history. If None, will automatically generate a new chat id when sending post request.
 
@@ -291,6 +292,7 @@ class GeminiClient:
             - If request failed with status code other than 200.
             - If response structure is invalid and failed to parse.
         """
+
         assert prompt, "Prompt cannot be empty."
 
         if self.auto_close:
@@ -306,12 +308,22 @@ class GeminiClient:
                             None,
                             json.dumps(
                                 [
-                                    image
+                                    images
                                     and [
                                         prompt,
                                         0,
                                         None,
-                                        [[[await upload_file(image, self.proxies), 1]]],
+                                        [
+                                            [
+                                                [
+                                                    await upload_file(
+                                                        image, self.proxies
+                                                    ),
+                                                    1,
+                                                ]
+                                            ]
+                                            for image in images
+                                        ],
                                     ]
                                     or [prompt],
                                     None,
@@ -334,44 +346,53 @@ class GeminiClient:
             )
         else:
             try:
+                response_json = json.loads(response.text.split("\n")[2])
+
                 # Plain request
-                body = json.loads(json.loads(response.text.split("\n")[2])[0][2])
+                body = json.loads(response_json[0][2])
 
                 if not body[4]:
-                    # Request with extensions as middleware
-                    body = json.loads(json.loads(response.text.split("\n")[2])[4][2])
+                    # Request with Gemini extensions enabled
+                    body = json.loads(response_json[4][2])
 
                 if not body[4]:
-                    raise APIError(
-                        "Failed to parse response body. Data structure is invalid. To report this error, please submit an issue at https://github.com/HanaokaYuzu/Gemini-API/issues"
-                    )
+                    raise Exception
             except Exception:
                 await self.close()
+                logger.debug(f"Invalid response: {response.text}")
                 raise APIError(
                     "Failed to generate contents. Invalid response data received. Client will try to re-initialize on next request."
                 )
 
             try:
                 candidates = []
-                for candidate in body[4]:
+                for i, candidate in enumerate(body[4]):
+                    text = candidate[1][0]
+                    if re.match(
+                        r"^http://googleusercontent.com/card_content/\d+$", text
+                    ):
+                        text = candidate[22] and candidate[22][0] or text
+
                     web_images = (
-                        candidate[4]
+                        candidate[12]
+                        and candidate[12][1]
                         and [
                             WebImage(
                                 url=image[0][0][0],
-                                title=image[2],
+                                title=image[7][0],
                                 alt=image[0][4],
                                 proxies=self.proxies,
                             )
-                            for image in candidate[4]
+                            for image in candidate[12][1]
                         ]
                         or []
                     )
-                    generated_images = (
-                        candidate[12]
-                        and candidate[12][7]
-                        and candidate[12][7][0]
-                        and [
+
+                    generated_images = []
+                    if candidate[12] and candidate[12][7] and candidate[12][7][0]:
+                        image_generation_body = json.loads(response_json[1][2])
+                        image_generation_candidate = image_generation_body[4][i]
+                        generated_images = [
                             GeneratedImage(
                                 url=image[0][3][3],
                                 title=f"[Generated Image {image[3][6]}]",
@@ -381,14 +402,15 @@ class GeminiClient:
                                 proxies=self.proxies,
                                 cookies=self.cookies,
                             )
-                            for i, image in enumerate(candidate[12][7][0])
-                        ]
-                        or []
-                    )
+                            for i, image in enumerate(
+                                image_generation_candidate[12][7][0]
+                            )
+                        ] or []
+
                     candidates.append(
                         Candidate(
                             rcid=candidate[0],
-                            text=candidate[1][0],
+                            text=text,
                             web_images=web_images,
                             generated_images=generated_images,
                         )
@@ -399,9 +421,10 @@ class GeminiClient:
                     )
 
                 output = ModelOutput(metadata=body[1], candidates=candidates)
-            except IndexError:
+            except (TypeError, IndexError):
+                logger.debug(f"Invalid response: {response.text}")
                 raise APIError(
-                    "Failed to parse response body. Data structure is invalid. To report this error, please submit an issue at https://github.com/HanaokaYuzu/Gemini-API/issues"
+                    "Failed to parse response body. Data structure is invalid."
                 )
 
             if isinstance(chat, ChatSession):
@@ -570,6 +593,7 @@ class GeminiClient:
         :class:`ChatSession`
             Empty chat object for retrieving conversation history.
         """
+
         return ChatSession(geminiclient=self, **kwargs)
 
 
@@ -627,7 +651,9 @@ class ChatSession:
             self.rcid = value.rcid
 
     async def send_message(
-        self, prompt: str, image: bytes | str | None = None
+        self,
+        prompt: str,
+        images: list[bytes | str | Path] | None = None,
     ) -> ModelOutput:
         """
         Generates contents with prompt.
@@ -637,8 +663,8 @@ class ChatSession:
         ----------
         prompt: `str`
             Prompt provided by user.
-        image: `bytes` | `str`, optional
-            File data in bytes, or path to the image file to be sent together with the prompt.
+        images: `list[bytes | str | Path]`, optional
+            List of image file paths or file data in bytes.
 
         Returns
         -------
@@ -658,8 +684,9 @@ class ChatSession:
             - If request failed with status code other than 200.
             - If response structure is invalid and failed to parse.
         """
+
         return await self.geminiclient.generate_content(
-            prompt=prompt, image=image, chat=self
+            prompt=prompt, images=images, chat=self
         )
 
     def choose_candidate(self, index: int) -> ModelOutput:
@@ -681,6 +708,7 @@ class ChatSession:
         `ValueError`
             If no previous output data found in this chat session, or if index exceeds the number of candidates in last model output.
         """
+
         if not self.last_output:
             raise ValueError("No previous output data found in this chat session.")
 

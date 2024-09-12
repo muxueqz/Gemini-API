@@ -2,11 +2,11 @@ import json
 import functools
 import asyncio
 from asyncio import Task
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from httpx import AsyncClient, ReadTimeout
 
-from .types import WebImage, GeneratedImage, Candidate, ModelOutput
+from .types import WebImage, GeneratedImage, Candidate, ModelOutput, Conversation
 from .exceptions import AuthError, APIError, TimeoutError, GeminiError
 from .constants import Endpoint, Headers
 from .utils import (
@@ -17,6 +17,7 @@ from .utils import (
     rotate_tasks,
     logger,
 )
+import random
 
 
 def running(retry: int = 0) -> callable:
@@ -103,6 +104,7 @@ class GeminiClient:
         self,
         secure_1psid: str | None = None,
         secure_1psidts: str | None = None,
+        cookies: dict | None = None,
         proxies: dict | None = None,
     ):
         self.cookies = {}
@@ -118,7 +120,9 @@ class GeminiClient:
         self.refresh_interval: float = 540
 
         # Validate cookies
-        if secure_1psid:
+        if cookies:
+            self.cookies = cookies
+        elif secure_1psid:
             self.cookies["__Secure-1PSID"] = secure_1psid
             if secure_1psidts:
                 self.cookies["__Secure-1PSIDTS"] = secure_1psidts
@@ -404,6 +408,153 @@ class GeminiClient:
                 chat.last_output = output
 
             return output
+
+    @running(retry=1)
+    async def list_all_conversations(
+        self,
+    ) -> list[Conversation]:
+        """
+        Generates contents with prompt.
+
+        Parameters
+        ----------
+
+        Returns
+        -------
+        :class:`ModelOutput`
+            Output data from gemini.google.com, use `ModelOutput.text` to get the default text reply, `ModelOutput.images` to get a list
+            of images in the default reply, `ModelOutput.candidates` to get a list of all answer candidates in the output.
+
+        Raises
+        ------
+        `AssertionError`
+            If prompt is empty.
+        `gemini_webapi.TimeoutError`
+            If request timed out.
+        `gemini_webapi.GenimiError`
+            If no reply candidate found in response.
+        `gemini_webapi.APIError`
+            - If request failed with status code other than 200.
+            - If response structure is invalid and failed to parse.
+        """
+
+        req = [[["MaZiqc", "[13,null,[0]]", None, "generic"]]]
+        req = json.dumps(req)
+
+        post_body = {
+            "f.req": req,
+            "at": self.access_token,
+        }
+
+        params = {
+                "rpcids": "MaZiqc",
+                "source-path": "/",
+#                "_reqid": 363154,
+                # "_reqid": 333154,
+                # "_reqid": random.randint(100000, 999999)
+                }
+        params = {
+            "rpcids": "MaZiqc",
+            # "source-path": "%2F",
+            "source-path": "/",
+            "bl": "boq_assistant-bard-web-server_20240318.08_p0",
+            # "f.sid": "-3888703240596674615",
+            # "hl": "zh-CN",
+            # "_reqid": "364498",
+            "rt": "c"
+        }
+
+        response = await self.client.post(
+            f"{Endpoint.BATCH_EXECUTE.value}?rpcids=MaZiqc&source-path=%2F&bl=boq_assistant-bard-web-server_20240318.08_p0&f.sid=-3888703240596674615&hl=zh-CN&_reqid=364498&rt=c",
+            data=post_body,
+            headers={
+                'accept': '*/*',
+                'snlm0e': self.access_token
+            }
+        )
+        chats = []
+        try:
+            body = json.loads(json.loads(response.text.split("\n")[3])[0][2])
+            if not body[2]:
+                raise APIError(
+                    "Failed to parse response body. Data structure is invalid. To report this error, please submit an issue at https://github.com/HanaokaYuzu/Gemini-API/issues"
+                )
+            for i in body[2]:
+                chats.append(Conversation(cid=i[0], name=i[1]))
+        except:
+            print(response.text.split('\n'))
+            raise APIError(
+                "Failed to parse response body. Data structure is invalid. To report this error, please submit an issue at https://github.com/HanaokaYuzu/Gemini-API/issues"
+            )
+
+
+        return chats
+
+    @running(retry=1)
+    async def chat_conversation_history(
+        self, cid
+    ) -> list[Dict]:
+        """
+        Returns all the messages in conversation
+
+        Parameters
+        ----------
+        cid: `str`
+            Chat id, if provided together with metadata, will override the first value in it.
+
+        Returns
+        -------
+        :class:`ModelOutput`
+            Output data from gemini.google.com, use `ModelOutput.text` to get the default text reply, `ModelOutput.images` to get a list
+            of images in the default reply, `ModelOutput.candidates` to get a list of all answer candidates in the output.
+
+        Raises
+        ------
+        `AssertionError`
+            If prompt is empty.
+        `gemini_webapi.TimeoutError`
+            If request timed out.
+        `gemini_webapi.GenimiError`
+            If no reply candidate found in response.
+        `gemini_webapi.APIError`
+            - If request failed with status code other than 200.
+            - If response structure is invalid and failed to parse.
+        """
+
+        req = [[["hNvQHb",f"[\"{cid}\",10,null,1,[0]]",None,"generic"]]]
+        req = json.dumps(req)
+
+        post_body = {
+            "f.req": req,
+            "at": self.access_token,
+        }
+
+
+        response = await self.client.post(
+            f"{Endpoint.BATCH_EXECUTE.value}?rpcids=hNvQHb&source-path=%2F&bl=boq_assistant-bard-web-server_20240318.08_p0&f.sid=-3888703240596674615&hl=zh-CN&_reqid=364498&rt=c",
+            data=post_body,
+            headers={
+                'accept': '*/*',
+                'snlm0e': self.access_token
+            }
+        )
+        r = []
+        try:
+            body = json.loads(json.loads(response.text.split("\n")[3])[0][2])[0]
+            for i in body:
+                # print(i)
+                me = i[2][0][0]
+                bot = i[3][0][0][1]
+                r.append({
+                    "me":me,
+                    "bot":bot,
+                    })
+        except:
+            print(response.text.split('\n'))
+            raise APIError(
+                "Failed to parse response body. Data structure is invalid. To report this error, please submit an issue at https://github.com/HanaokaYuzu/Gemini-API/issues"
+            )
+        return r
 
     def start_chat(self, **kwargs) -> "ChatSession":
         """

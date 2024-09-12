@@ -6,7 +6,7 @@ from asyncio import Task
 from .types import WebImage, GeneratedImage, Candidate, ModelOutput, Conversation
 from .exceptions import AuthError, APIError, TimeoutError, GeminiError
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Dict
 
 from httpx import AsyncClient, ReadTimeout
 
@@ -503,7 +503,7 @@ class GeminiClient:
                     "Failed to parse response body. Data structure is invalid. To report this error, please submit an issue at https://github.com/HanaokaYuzu/Gemini-API/issues"
                 )
             for i in body[2]:
-                chats.append(Conversation(cid=i[0], name=i[1]))
+                chats.append(Conversation(cid=i[0], name=i[1].strip("\n")))
         except:
             print(response.text.split('\n'))
             raise APIError(
